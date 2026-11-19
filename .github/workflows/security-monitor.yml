@@ -1,0 +1,97 @@
+
+name: Frontend Security Monitor
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-advisories:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check GitHub Security Advisories
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const packages = [
+              "vite",
+              "react",
+              "react-dom",
+              "next",
+              "typescript"
+            ];
+
+            const advisories = await github.paginate(
+              "GET /advisories",
+              {
+                ecosystem: "npm",
+                affects: packages.join(","),
+                type: "reviewed",
+                per_page: 100,
+                sort: "updated",
+                direction: "desc"
+              }
+            );
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "all",
+                per_page: 100
+              }
+            );
+
+            for (const advisory of advisories) {
+              if (advisory.withdrawn_at) continue;
+
+              const affected = advisory.vulnerabilities
+                .filter(v => packages.includes(v.package.name));
+
+              if (!affected.length) continue;
+
+              const existing = issues.some(issue =>
+                !issue.pull_request &&
+                issue.title.includes(advisory.ghsa_id)
+              );
+
+              if (existing) continue;
+
+              const packageDetails = affected.map(v =>
+                `- ${v.package.name}: ${v.vulnerable_version_range || "version range unavailable"}`
+                + (v.first_patched_version
+                  ? ` (patched: ${v.first_patched_version})`
+                  : "")
+              ).join("\n");
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[Security] ${advisory.ghsa_id}: ${advisory.summary}`,
+                body: [
+                  `## ${advisory.summary}`,
+                  "",
+                  `**Severity:** ${advisory.severity}`,
+                  `**Published:** ${advisory.published_at}`,
+                  `**GHSA:** ${advisory.ghsa_id}`,
+                  "",
+                  "### Affected packages",
+                  packageDetails,
+                  "",
+                  `**Official advisory:** ${advisory.html_url}`,
+                  "",
+                  "Automatically detected by Frontend Security Monitor."
+                ].join("\n")
+              });
+
+              core.info(`Created issue for ${advisory.ghsa_id}`);
+            }
+
+            core.info(`Checked ${advisories.length} advisories.`);
