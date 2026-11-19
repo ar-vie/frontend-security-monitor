@@ -13,7 +13,6 @@ permissions:
 jobs:
   check-advisories:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check GitHub Security Advisories
         uses: actions/github-script@v7
@@ -49,49 +48,63 @@ jobs:
               }
             );
 
-            for (const advisory of advisories) {
-              if (advisory.withdrawn_at) continue;
+            const seen = new Set();
 
-              const affected = advisory.vulnerabilities
-                .filter(v => packages.includes(v.package.name));
-
-              if (!affected.length) continue;
-
-              const existing = issues.some(issue =>
-                !issue.pull_request &&
-                issue.title.includes(advisory.ghsa_id)
-              );
-
-              if (existing) continue;
-
-              const packageDetails = affected.map(v =>
-                `- ${v.package.name}: ${v.vulnerable_version_range || "version range unavailable"}`
-                + (v.first_patched_version
-                  ? ` (patched: ${v.first_patched_version})`
-                  : "")
-              ).join("\n");
-
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `[Security] ${advisory.ghsa_id}: ${advisory.summary}`,
-                body: [
-                  `## ${advisory.summary}`,
-                  "",
-                  `**Severity:** ${advisory.severity}`,
-                  `**Published:** ${advisory.published_at}`,
-                  `**GHSA:** ${advisory.ghsa_id}`,
-                  "",
-                  "### Affected packages",
-                  packageDetails,
-                  "",
-                  `**Official advisory:** ${advisory.html_url}`,
-                  "",
-                  "Automatically detected by Frontend Security Monitor."
-                ].join("\n")
-              });
-
-              core.info(`Created issue for ${advisory.ghsa_id}`);
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              const text = `${issue.title}\n${issue.body || ""}`;
+              for (const match of text.matchAll(
+                /GHSA-[a-z0-9-]+/gi
+              )) {
+                seen.add(match[0].toUpperCase());
+              }
             }
 
-            core.info(`Checked ${advisories.length} advisories.`);
+            const fresh = advisories.filter(a =>
+              !a.withdrawn_at &&
+              !seen.has(a.ghsa_id.toUpperCase()) &&
+              a.vulnerabilities.some(v =>
+                packages.includes(v.package.name)
+              )
+            );
+
+            if (!fresh.length) {
+              core.info("No new security advisories found.");
+              return;
+            }
+
+            const report = fresh.map(a => {
+              const affected = a.vulnerabilities
+                .filter(v => packages.includes(v.package.name))
+                .map(v =>
+                  `- ${v.package.name}: ${v.vulnerable_version_range || "Unknown"}`
+                  + (v.first_patched_version
+                    ? ` (fixed: ${v.first_patched_version})`
+                    : "")
+                ).join("\n");
+
+              return [
+                `## ${a.summary}`,
+                `- **GHSA:** ${a.ghsa_id}`,
+                `- **Severity:** ${a.severity}`,
+                `- **Published:** ${a.published_at}`,
+                `- **Packages:**`,
+                affected,
+                `- **Details:** ${a.html_url}`
+              ].join("\n");
+            }).join("\n\n---\n\n");
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Security] ${fresh.length} new frontend advisory(s)`,
+              body: [
+                "# Frontend Security Report",
+                "",
+                `Found ${fresh.length} new reviewed advisories.`,
+                "",
+                report
+              ].join("\n")
+            });
+
+            core.info(`Created one report with ${fresh.length} advisories.`);
